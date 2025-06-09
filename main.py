@@ -13,6 +13,12 @@ nicht möglich. Alternativen zum W5500-Modul könnten sein:
 - LAN8720 Ethernet-Modul (benötigt andere Bibliothek)
 - USB-zu-Ethernet-Adapter (benötigt USB-Host-Funktionalität)
 
+UMGEBUNGSHINWEIS:
+Dieses Skript ist ausschließlich für die Ausführung auf einem Raspberry Pi Pico 2 mit 
+MicroPython-Firmware konzipiert. Es kann nicht in einer Standard-Python-Umgebung auf einem
+Computer ausgeführt werden. Bitte folgen Sie den Anweisungen in der Datei 
+'MicroPython_Installation.md', um die erforderliche Umgebung einzurichten.
+
 Fehlerbehebungen:
 - Konfigurierbare Hue Bridge IP-Adresse hinzugefügt
 - Verbesserte Fehlerbehandlung für Netzwerkkommunikation
@@ -22,11 +28,41 @@ Fehlerbehebungen:
 - Detailliertere Statusmeldungen hinzugefügt
 """
 
-import network
+# Überprüfen, ob das Skript in der richtigen Umgebung ausgeführt wird
+import sys
+if 'micropython' not in sys.implementation.name.lower():
+    print("FEHLER: Dieses Skript kann nur auf einem Raspberry Pi Pico 2 mit MicroPython ausgeführt werden.")
+    print("Bitte folgen Sie den Anweisungen in der Datei 'MicroPython_Installation.md', um die")
+    print("erforderliche Umgebung einzurichten und das Skript auf den Pico zu übertragen.")
+    sys.exit(1)
+
+# MicroPython-spezifische Importe
+try:
+    import network
+except ImportError:
+    print("FEHLER: Das 'network' Modul wurde nicht gefunden.")
+    print("Bitte stellen Sie sicher, dass Sie die MicroPython-Firmware mit WLAN-Unterstützung installiert haben.")
+    print("Folgen Sie den Anweisungen in der Datei 'MicroPython_Installation.md', Abschnitt 1.2:")
+    print("Wählen Sie die Version mit WLAN-Unterstützung für Ihren Raspberry Pi Pico.")
+    import sys
+    sys.exit(1)
+
 import socket
 import time
 import machine
 from machine import Pin
+import network
+import machine
+import time
+
+try:
+    import wiznet5k
+except ImportError:
+    print("wiznet5k-Bibliothek nicht gefunden!")
+    print("Installiere wiznet5k-Bibliothek...")
+    import mip
+    mip.install("wiznet5k")
+    import wiznet5k
 
 # Configuration - Replace with your network details
 WIFI_SSID = "Feel Good Lounge"
@@ -36,45 +72,99 @@ WIFI_PASSWORD = "freieenergie"
 HUE_BRIDGE_IP = "192.168.1.61"  # Replace with your Hue Bridge IP address on the Ethernet network
 
 # Status LEDs
-led_wifi = Pin(28, Pin.OUT)  # LED to indicate WiFi status
-led_eth = Pin(27, Pin.OUT)   # LED to indicate Ethernet status
-led_data = Pin(26, Pin.OUT)  # LED to indicate data transfer
+WIFI_LED_PIN = 28
+ETH_LED_PIN = 27
+DATA_LED_PIN = 26
+led_wifi = Pin(WIFI_LED_PIN, Pin.OUT)  # LED to indicate WiFi status
+led_eth = Pin(ETH_LED_PIN, Pin.OUT)   # LED to indicate Ethernet status
+led_data = Pin(DATA_LED_PIN, Pin.OUT)  # LED to indicate data transfer
 
 # SPI pins for W5500 Ethernet module
-spi_id = 0
-sck = Pin(1)
-mosi = Pin(3)
-miso = Pin(4)
-cs = Pin(2)
-rst = Pin(5)
+spi_id = 0     
+SCK_PIN = 2    # GP2 als SCK
+MOSI_PIN = 3   # GP3 als MOSI
+MISO_PIN = 4   # GP4 als MISO
+CS_PIN = 5     # GP5 als CS
+RST_PIN = 6    # GP6 als RST
+sck = Pin(SCK_PIN)
+mosi = Pin(MOSI_PIN)
+miso = Pin(MISO_PIN)
+cs = Pin(CS_PIN)
+rst = Pin(RST_PIN)
 
 # Function to initialize Ethernet
 def initialize_ethernet():
-    # Reset the Ethernet module
+    print("\nInitialisiere Ethernet...")
+    print("Hardware Reset...")
+    
+    # Hardware Reset mit längeren Wartezeiten
     rst.value(0)
-    time.sleep(0.1)
+    time.sleep(1.0)  # Längere Reset-Zeit
     rst.value(1)
-    time.sleep(0.1)
-
-    # Initialize SPI for Ethernet
-    spi = machine.SPI(spi_id, baudrate=10000000, polarity=0, phase=0, sck=sck, mosi=mosi, miso=miso)
-
-    # Initialize Ethernet using wiznet5k library
+    time.sleep(1.0)  # Längere Aufwachzeit
+    
+    print("Konfiguriere SPI...")
+    # SPI mit niedrigerer Geschwindigkeit für die Diagnose
+    spi = machine.SPI(spi_id,
+                      baudrate=100000,  # Reduziert auf 100 kHz
+                      polarity=0,
+                      phase=0,
+                      bits=8,
+                      firstbit=machine.SPI.MSB,
+                      sck=sck,
+                      mosi=mosi,
+                      miso=miso)
+    
+    def read_register(address):
+        """Liest ein Register vom W5500"""
+        cs.value(0)
+        time.sleep(0.001)
+        
+        # Sende Adresse und Kontrollbyte
+        spi.write(bytes([address >> 8]))    # Adresse High
+        spi.write(bytes([address & 0xFF]))  # Adresse Low
+        spi.write(bytes([0x00]))           # Kontrollbyte für Lesen
+        
+        # Lese Daten
+        result = bytearray(1)
+        spi.readinto(result)
+        
+        cs.value(1)
+        time.sleep(0.001)
+        return result[0]
+    
     try:
-        import wiznet5k
-        eth = wiznet5k.WIZNET5K(spi, cs, rst)
-        # Use DHCP for Ethernet
-        eth.dhcp_start()
-        print("Ethernet initialized with IP:", eth.ifconfig()[0])
-        led_eth.value(1)  # Turn on Ethernet LED
-        return eth
-    except ImportError:
-        print("wiznet5k library not found. Please install it for Ethernet support.")
-        led_eth.value(0)
-        return None
+        print("\nDiagnose-Test:")
+        
+        # Teste Chip-Version
+        version = read_register(0x0039)
+        print(f"Chip Version: 0x{version:02x} (erwartet: 0x04)")
+        
+        # Teste Mode Register
+        mode = read_register(0x0000)
+        print(f"Mode Register: 0x{mode:02x}")
+        
+        if version != 0x04:
+            print("\nFehlerdiagnose:")
+            print("1. Überprüfen Sie die Stromversorgung (3.3V)")
+            print("2. Überprüfen Sie die Verkabelung:")
+            print(f"   - SCK:  GPIO{sck.id()}")
+            print(f"   - MOSI: GPIO{mosi.id()}")
+            print(f"   - MISO: GPIO{miso.id()}")
+            print(f"   - CS:   GPIO{cs.id()}")
+            print(f"   - RST:  GPIO{rst.id()}")
+            print("3. Messen Sie die Signale mit einem Oszilloskop")
+            raise Exception("W5500 antwortet nicht korrekt")
+        
+        print("\nChip-Test erfolgreich, initialisiere Netzwerk-Interface...")
+        nic = wiznet5k.WIZNET5K(spi, cs, rst)
+        nic.active(True)
+        print("Ethernet-Interface aktiviert")
+        
+        return nic
+
     except Exception as e:
-        print("Error initializing Ethernet:", e)
-        led_eth.value(0)
+        print("Fehler bei der Ethernet-Initialisierung:", e)
         return None
 
 # Connect to WiFi
@@ -105,7 +195,7 @@ def connect_wifi():
             led_wifi.value(0)
             return None
     else:
-        print("Already connected to WiFi. IP:", wlan.ifconfig()[0])
+        print("Already connected to WiFi Roli. IP:", wlan.ifconfig()[0])
         led_wifi.value(1)
         return wlan
 
@@ -249,3 +339,89 @@ def main():
 # Run the main function
 if __name__ == "__main__":
     main()
+
+
+def bit_banging_spi_test():
+    print("\nStarte Bit-Banging SPI Test...")
+    
+    # Pins konfigurieren
+    sck.init(mode=machine.Pin.OUT)
+    mosi.init(mode=machine.Pin.OUT)
+    miso.init(mode=machine.Pin.IN)
+    cs.init(mode=machine.Pin.OUT)
+    rst.init(mode=machine.Pin.OUT)
+    
+    # Initiale Pin-Zustände
+    sck.value(0)
+    mosi.value(0)
+    cs.value(1)
+    rst.value(1)
+    
+    def send_byte(byte_val):
+        """Sendet ein Byte über Bit-Banging"""
+        for i in range(8):
+            # MSB first
+            bit = (byte_val & 0x80) >> 7
+            mosi.value(bit)
+            time.sleep(0.001)  # 1ms Verzögerung
+            
+            # Clock pulse
+            sck.value(1)
+            time.sleep(0.001)
+            sck.value(0)
+            time.sleep(0.001)
+            
+            byte_val <<= 1
+    
+    def read_byte():
+        """Liest ein Byte über Bit-Banging"""
+        result = 0
+        for i in range(8):
+            sck.value(1)
+            time.sleep(0.001)
+            
+            # Bit lesen
+            bit = miso.value()
+            result = (result << 1) | bit
+            
+            sck.value(0)
+            time.sleep(0.001)
+        return result
+    
+    try:
+        print("Hardware Reset...")
+        rst.value(0)
+        time.sleep(0.5)
+        rst.value(1)
+        time.sleep(0.5)
+        
+        print("\nLese W5500 Version Register...")
+        cs.value(0)  # CS aktiv
+        time.sleep(0.01)
+        
+        # Sende Adresse und Kommando für Version Register (0x0039)
+        send_byte(0x00)  # Adresse High
+        send_byte(0x39)  # Adresse Low
+        send_byte(0x00)  # Lese-Kommando
+        
+        # Lese Antwort
+        version = read_byte()
+        
+        cs.value(1)  # CS inaktiv
+        time.sleep(0.01)
+        
+        print(f"Gelesener Wert: {hex(version)}")
+        if version == 0x04:
+            print("W5500 erfolgreich erkannt!")
+        else:
+            print("Unerwartete Version oder keine Antwort")
+            print("\nBitte überprüfen:")
+            print("1. MISO-Signalpegel mit Oszilloskop während der Übertragung")
+            print("2. CS-Signal (sollte während der Übertragung LOW sein)")
+            print("3. Spannung am W5500 (3.3V)")
+            
+    except Exception as e:
+        print("Fehler beim SPI-Test:", e)
+
+# Test ausführen
+#bit_banging_spi_test()

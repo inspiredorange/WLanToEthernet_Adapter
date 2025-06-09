@@ -11,8 +11,8 @@
 
 1. Besuchen Sie die offizielle MicroPython-Website: [https://micropython.org/download/rp2-pico/](https://micropython.org/download/rp2-pico/)
 2. Laden Sie die neueste stabile Version der Firmware herunter (Datei mit der Endung `.uf2`)
-   - Wählen Sie die Standard-Version für allgemeine Anwendungen
-   - Alternativ können Sie auch die Version mit WLAN-Unterstützung wählen, wenn Ihr Pico W WLAN-Funktionalität hat
+   - **WICHTIG**: Für dieses Projekt müssen Sie die Version mit WLAN-Unterstützung wählen, da das Skript das 'network' Modul benötigt, welches nur in dieser Version enthalten ist
+   - Suchen Sie nach einer Firmware-Datei, die "WLAN" oder "network" im Namen enthält
 
 ### 2. Vorbereiten des Raspberry Pi Pico 2
 
@@ -76,6 +76,9 @@ print("wiznet5k erfolgreich installiert")
 
 - **Problem**: Die wiznet5k-Bibliothek kann nicht installiert werden
   **Lösung**: Stellen Sie sicher, dass Ihr Pico mit dem Internet verbunden ist oder installieren Sie die Bibliothek manuell
+
+- **Problem**: Fehlermeldung "ImportError: no module named 'network'"
+  **Lösung**: Sie haben wahrscheinlich die Standard-Version der MicroPython-Firmware ohne WLAN-Unterstützung installiert. Laden Sie die Version mit WLAN-Unterstützung herunter und installieren Sie diese, wie in Abschnitt 1.2 beschrieben.
 
 ## Hinweise
 

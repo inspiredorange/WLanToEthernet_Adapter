@@ -1,0 +1,6 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Execute main.ipynb" type="micropython-tools-configuration-type" factoryName="micropython-tools-execute-configuration">
+    <option name="path" value="$PROJECT_DIR$/main.py" />
+    <method v="2" />
+  </configuration>
+</component>
