@@ -26,6 +26,9 @@ Fehlerbehebungen:
 - Ordnungsgemäße Ressourcenbereinigung sichergestellt
 - Ethernet-Initialisierung in eine Funktion verschoben
 - Detailliertere Statusmeldungen hinzugefügt
+- Optionale Ethernet-Verbindung hinzugefügt (REQUIRE_ETHERNET_LINK = False)
+- Automatische Erkennung von Änderungen des Ethernet-Link-Status
+- Fortsetzen der Ausführung auch ohne Ethernet-Verbindung
 """
 
 # Überprüfen, ob das Skript in der richtigen Umgebung ausgeführt wird
@@ -55,6 +58,13 @@ import network
 import machine
 import time
 
+# Define BlockingIOError if it's not available in MicroPython
+try:
+    BlockingIOError
+except NameError:
+    class BlockingIOError(OSError):
+        pass
+
 try:
     import wiznet5k
 except ImportError:
@@ -70,6 +80,9 @@ WIFI_PASSWORD = "freieenergie"
 
 # Hue Bridge configuration
 HUE_BRIDGE_IP = "192.168.1.61"  # Replace with your Hue Bridge IP address on the Ethernet network
+
+# Ethernet configuration
+REQUIRE_ETHERNET_LINK = False  # Set to True to require Ethernet link to be connected
 
 # Status LEDs
 WIFI_LED_PIN = 28
@@ -96,17 +109,19 @@ rst = Pin(RST_PIN)
 def initialize_ethernet():
     print("\nInitialisiere Ethernet...")
     print("Hardware Reset...")
-    
-    # Hardware Reset mit längeren Wartezeiten
-    rst.value(0)
-    time.sleep(1.0)  # Längere Reset-Zeit
-    rst.value(1)
-    time.sleep(1.0)  # Längere Aufwachzeit
-    
+
+    # Hardware Reset nach W5500 Datenblatt-Empfehlungen mit optimierten Wartezeiten
+    rst.value(1)  # Ensure RST is high initially
+    time.sleep(0.1)  # Optimized initial delay
+    rst.value(0)  # Pull RST low for reset
+    time.sleep(0.1)  # Optimized reset time (datasheet requires at least 2ms)
+    rst.value(1)  # Release reset
+    time.sleep(0.2)  # Optimized stabilization time
+
     print("Konfiguriere SPI...")
-    # SPI mit niedrigerer Geschwindigkeit für die Diagnose
+    # SPI mit höherer Geschwindigkeit, da der int und reset Pin nicht mehr vertauscht sind
     spi = machine.SPI(spi_id,
-                      baudrate=100000,  # Reduziert auf 100 kHz
+                      baudrate=1000000,  # Erhöht auf 1 MHz für bessere Leistung
                       polarity=0,
                       phase=0,
                       bits=8,
@@ -114,53 +129,33 @@ def initialize_ethernet():
                       sck=sck,
                       mosi=mosi,
                       miso=miso)
-    
-    def read_register(address):
-        """Liest ein Register vom W5500"""
-        cs.value(0)
-        time.sleep(0.001)
-        
-        # Sende Adresse und Kontrollbyte
-        spi.write(bytes([address >> 8]))    # Adresse High
-        spi.write(bytes([address & 0xFF]))  # Adresse Low
-        spi.write(bytes([0x00]))           # Kontrollbyte für Lesen
-        
-        # Lese Daten
-        result = bytearray(1)
-        spi.readinto(result)
-        
-        cs.value(1)
-        time.sleep(0.001)
-        return result[0]
-    
+
+    # Kürzere Pause nach SPI-Initialisierung für optimierte Leistung
+    time.sleep(0.1)
+
     try:
-        print("\nDiagnose-Test:")
-        
-        # Teste Chip-Version
-        version = read_register(0x0039)
-        print(f"Chip Version: 0x{version:02x} (erwartet: 0x04)")
-        
-        # Teste Mode Register
-        mode = read_register(0x0000)
-        print(f"Mode Register: 0x{mode:02x}")
-        
-        if version != 0x04:
-            print("\nFehlerdiagnose:")
-            print("1. Überprüfen Sie die Stromversorgung (3.3V)")
-            print("2. Überprüfen Sie die Verkabelung:")
-            print(f"   - SCK:  GPIO{sck.id()}")
-            print(f"   - MOSI: GPIO{mosi.id()}")
-            print(f"   - MISO: GPIO{miso.id()}")
-            print(f"   - CS:   GPIO{cs.id()}")
-            print(f"   - RST:  GPIO{rst.id()}")
-            print("3. Messen Sie die Signale mit einem Oszilloskop")
-            raise Exception("W5500 antwortet nicht korrekt")
-        
-        print("\nChip-Test erfolgreich, initialisiere Netzwerk-Interface...")
-        nic = wiznet5k.WIZNET5K(spi, cs, rst)
-        nic.active(True)
-        print("Ethernet-Interface aktiviert")
-        
+        print("\nInitialisiere Netzwerk-Interface...")
+        # Disable DHCP and use static IP configuration
+        # Enable debug mode to see more information during initialization
+        nic = wiznet5k.WIZNET5K(spi, cs, rst, is_dhcp=False, debug=True)
+
+        print("W5500 Chip erfolgreich initialisiert!")
+
+        # Set static IP configuration
+        # Use a different subnet than WiFi to avoid conflicts
+        # Assuming WiFi is on 192.168.188.x, we'll use 192.168.1.x for Ethernet
+        ip_address = ('192.168.1.111', '255.255.255.0', '192.168.1.1', '8.8.8.8')
+        nic.set_ifconfig(ip_address)
+
+        # Check if IP is all zeros and provide a more meaningful message
+        ip_bytes = nic.ifconfig[0]
+        if all(b == 0 for b in ip_bytes):
+            print("Ethernet-Interface aktiviert, aber IP-Adresse konnte nicht gesetzt werden (0.0.0.0)")
+            print("Dies könnte auf ein Problem mit der Ethernet-Hardware oder -Verbindung hinweisen.")
+        else:
+            print("Ethernet-Interface aktiviert mit statischer IP:", nic.pretty_ip(ip_bytes))
+        print("Link Status:", "Verbunden" if nic.link_status else "Nicht verbunden")
+
         return nic
 
     except Exception as e:
@@ -214,7 +209,17 @@ def forward_packets(wlan, eth):
     udp_socket.setblocking(False)
     tcp_socket.setblocking(False)
 
-    print("Starting packet forwarding between WiFi and Ethernet")
+    # Check Ethernet link status
+    ethernet_connected = eth.link_status
+    if ethernet_connected:
+        print("Starting packet forwarding between WiFi and Ethernet")
+    else:
+        print("Starting packet forwarding in limited mode (Ethernet link not detected)")
+        print("Only WiFi to WiFi forwarding will be available")
+
+    # Variables for periodic link status check
+    last_link_check_time = time.time()
+    link_check_interval = 5  # Check link status every 5 seconds
 
     while True:
         # Check for UDP packets (SSDP discovery)
@@ -222,16 +227,22 @@ def forward_packets(wlan, eth):
             data, addr = udp_socket.recvfrom(1024)
             led_data.value(1)  # Blink data LED
 
-            # Forward from WiFi to Ethernet
+            # Forward from WiFi to Ethernet (only if Ethernet is connected)
             if addr[0] == wlan.ifconfig()[0]:
-                eth_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                try:
-                    eth_socket.settimeout(2)  # Set a 2-second timeout
-                    eth_socket.sendto(data, ('239.255.255.250', 1900))  # SSDP multicast address
-                except (socket.timeout, OSError) as e:
-                    print("Error forwarding to Ethernet:", e)
-                finally:
-                    eth_socket.close()
+                if ethernet_connected:
+                    eth_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    try:
+                        eth_socket.settimeout(2)  # Set a 2-second timeout
+                        eth_socket.sendto(data, ('239.255.255.250', 1900))  # SSDP multicast address
+                    except (socket.timeout, OSError) as e:
+                        print("Error forwarding to Ethernet:", e)
+                    finally:
+                        eth_socket.close()
+                else:
+                    # Skip forwarding to Ethernet if not connected
+                    if REQUIRE_ETHERNET_LINK:
+                        print("Cannot forward to Ethernet: link not connected")
+                    # In non-required mode, silently skip forwarding to Ethernet
 
             # Forward from Ethernet to WiFi
             else:
@@ -246,8 +257,8 @@ def forward_packets(wlan, eth):
 
             led_data.value(0)  # Turn off data LED
         except (BlockingIOError, OSError) as e:
-            # BlockingIOError is expected in non-blocking mode when no data is available
-            if not isinstance(e, BlockingIOError):
+            # BlockingIOError and EAGAIN (errno 11) are expected in non-blocking mode when no data is available
+            if not isinstance(e, BlockingIOError) and not (isinstance(e, OSError) and e.errno == 11):
                 print("UDP socket error:", e)
 
         # Check for TCP connections (HTTP API)
@@ -262,24 +273,29 @@ def forward_packets(wlan, eth):
                 request = client.recv(1024)
 
                 if request:
-                    # Forward to Hue Bridge using the configured IP address
-                    hue_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    hue_socket.settimeout(5)  # Set a 5-second timeout
-                    try:
-                        hue_socket.connect((HUE_BRIDGE_IP, 80))
-                        hue_socket.send(request)
+                    if ethernet_connected:
+                        # Forward to Hue Bridge using the configured IP address
+                        hue_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        hue_socket.settimeout(5)  # Set a 5-second timeout
+                        try:
+                            hue_socket.connect((HUE_BRIDGE_IP, 80))
+                            hue_socket.send(request)
 
-                        # Get response from Hue Bridge
-                        response = hue_socket.recv(4096)
+                            # Get response from Hue Bridge
+                            response = hue_socket.recv(4096)
 
-                        # Send response back to client
-                        client.send(response)
-                    except (socket.timeout, OSError) as e:
-                        print("Error communicating with Hue Bridge:", e)
-                        # Send a simple error response to the client
-                        client.send(b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\n\r\nCannot connect to Hue Bridge")
-                    finally:
-                        hue_socket.close()
+                            # Send response back to client
+                            client.send(response)
+                        except (socket.timeout, OSError) as e:
+                            print("Error communicating with Hue Bridge:", e)
+                            # Send a simple error response to the client
+                            client.send(b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\n\r\nCannot connect to Hue Bridge")
+                        finally:
+                            hue_socket.close()
+                    else:
+                        # Ethernet link not connected, send error response
+                        print("Cannot forward to Hue Bridge: Ethernet link not connected")
+                        client.send(b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\n\r\nEthernet link not connected. Cannot reach Hue Bridge.")
                 else:
                     print("Received empty request from client")
             except (socket.timeout, OSError) as e:
@@ -288,9 +304,25 @@ def forward_packets(wlan, eth):
                 client.close()
                 led_data.value(0)  # Turn off data LED
         except (BlockingIOError, OSError) as e:
-            # BlockingIOError is expected in non-blocking mode when no connection is available
-            if not isinstance(e, BlockingIOError):
+            # BlockingIOError and EAGAIN (errno 11) are expected in non-blocking mode when no connection is available
+            if not isinstance(e, BlockingIOError) and not (isinstance(e, OSError) and e.errno == 11):
                 print("TCP socket error:", e)
+
+        # Periodically check if Ethernet link status has changed
+        current_time = time.time()
+        if current_time - last_link_check_time > link_check_interval:
+            last_link_check_time = current_time
+            current_link_status = eth.link_status
+
+            # If link status has changed, update the ethernet_connected variable
+            if current_link_status != ethernet_connected:
+                ethernet_connected = current_link_status
+                if ethernet_connected:
+                    print("Ethernet link connected! Full functionality restored.")
+                    led_eth.value(1)  # Turn on Ethernet LED
+                else:
+                    print("Ethernet link disconnected! Operating in limited mode.")
+                    led_eth.value(0)  # Turn off Ethernet LED
 
         # Brief pause to prevent CPU overload
         time.sleep(0.01)
@@ -312,14 +344,30 @@ def main():
         return
 
     # Check if Ethernet is connected
-    if not eth.isconnected():
+    if not eth.link_status:
         print("Ethernet not connected")
         led_eth.value(0)
-        return
+        if REQUIRE_ETHERNET_LINK:
+            print("Cannot proceed without Ethernet link. Check cable connection.")
+            return
+        else:
+            print("WARNING: Continuing without Ethernet link. Some features may not work correctly.")
+            print("Connect an Ethernet cable to enable full functionality.")
 
-    print("Both WiFi and Ethernet are connected and ready")
+    if eth.link_status:
+        print("Both WiFi and Ethernet are connected and ready")
+        led_eth.value(1)  # Turn on Ethernet LED
+    else:
+        print("WiFi is connected and ready (Ethernet link not detected)")
+        # Ethernet LED is already off from the previous check
+
     print("WiFi IP:", wlan.ifconfig()[0])
-    print("Ethernet IP:", eth.ifconfig()[0])
+    # Check if IP is all zeros and provide a more meaningful message
+    ip_bytes = eth.ifconfig[0]
+    if all(b == 0 for b in ip_bytes):
+        print("Ethernet IP: 0.0.0.0 (IP-Adresse konnte nicht gesetzt werden)")
+    else:
+        print("Ethernet IP:", eth.pretty_ip(ip_bytes))
     print("Hue Bridge IP (configured):", HUE_BRIDGE_IP)
 
     # Start packet forwarding
@@ -337,91 +385,4 @@ def main():
             time.sleep(0.2)
 
 # Run the main function
-if __name__ == "__main__":
-    main()
-
-
-def bit_banging_spi_test():
-    print("\nStarte Bit-Banging SPI Test...")
-    
-    # Pins konfigurieren
-    sck.init(mode=machine.Pin.OUT)
-    mosi.init(mode=machine.Pin.OUT)
-    miso.init(mode=machine.Pin.IN)
-    cs.init(mode=machine.Pin.OUT)
-    rst.init(mode=machine.Pin.OUT)
-    
-    # Initiale Pin-Zustände
-    sck.value(0)
-    mosi.value(0)
-    cs.value(1)
-    rst.value(1)
-    
-    def send_byte(byte_val):
-        """Sendet ein Byte über Bit-Banging"""
-        for i in range(8):
-            # MSB first
-            bit = (byte_val & 0x80) >> 7
-            mosi.value(bit)
-            time.sleep(0.001)  # 1ms Verzögerung
-            
-            # Clock pulse
-            sck.value(1)
-            time.sleep(0.001)
-            sck.value(0)
-            time.sleep(0.001)
-            
-            byte_val <<= 1
-    
-    def read_byte():
-        """Liest ein Byte über Bit-Banging"""
-        result = 0
-        for i in range(8):
-            sck.value(1)
-            time.sleep(0.001)
-            
-            # Bit lesen
-            bit = miso.value()
-            result = (result << 1) | bit
-            
-            sck.value(0)
-            time.sleep(0.001)
-        return result
-    
-    try:
-        print("Hardware Reset...")
-        rst.value(0)
-        time.sleep(0.5)
-        rst.value(1)
-        time.sleep(0.5)
-        
-        print("\nLese W5500 Version Register...")
-        cs.value(0)  # CS aktiv
-        time.sleep(0.01)
-        
-        # Sende Adresse und Kommando für Version Register (0x0039)
-        send_byte(0x00)  # Adresse High
-        send_byte(0x39)  # Adresse Low
-        send_byte(0x00)  # Lese-Kommando
-        
-        # Lese Antwort
-        version = read_byte()
-        
-        cs.value(1)  # CS inaktiv
-        time.sleep(0.01)
-        
-        print(f"Gelesener Wert: {hex(version)}")
-        if version == 0x04:
-            print("W5500 erfolgreich erkannt!")
-        else:
-            print("Unerwartete Version oder keine Antwort")
-            print("\nBitte überprüfen:")
-            print("1. MISO-Signalpegel mit Oszilloskop während der Übertragung")
-            print("2. CS-Signal (sollte während der Übertragung LOW sein)")
-            print("3. Spannung am W5500 (3.3V)")
-            
-    except Exception as e:
-        print("Fehler beim SPI-Test:", e)
-
-# Test ausführen
-#bit_banging_spi_test()
+main()

@@ -5,6 +5,6 @@
     <option name="increasedFileTransferBaudrate" value="115200" />
     <option name="legacyVolumeSupportEnabled" value="true" />
     <option name="pluginEnabled" value="true" />
-    <option name="portName" value="/dev/cu.usbmodem14401" />
+    <option name="portName" value="/dev/cu.usbmodem14301" />
   </component>
 </project>

@@ -3,31 +3,27 @@ from machine import Pin, SPI
 import wiznet5k_socket as socket
 import sma_esp32_w5500_requests as requests
 
+# SPI pins for W5500 Ethernet module on Raspberry Pi Pico W
+SCK_PIN = 2    # GP2 as SCK
+MOSI_PIN = 3   # GP3 as MOSI
+MISO_PIN = 4   # GP4 as MISO
+CS_PIN = 5     # GP5 as CS
+RST_PIN = 6    # GP6 as RST
 
+# Initialize SPI with proper pins for Raspberry Pi Pico W
+spi = SPI(0,
+          baudrate=100000,  # Reduced to 100 kHz for stability
+          polarity=0,
+          phase=0,
+          bits=8,
+          firstbit=SPI.MSB,
+          sck=Pin(SCK_PIN),
+          mosi=Pin(MOSI_PIN),
+          miso=Pin(MISO_PIN))
 
-spi = SPI(2)
-cs = Pin(5,Pin.OUT)
-rst=Pin(34)
-nic = WIZNET5K(spi,cs,rst)
-
-TEXT_URL = "http://quietlushbrightverse.neverssl.com/online/"
-
-
-print("Chip Version:", nic.chip)
-print("MAC Address:", [hex(i) for i in nic.mac_address])
-print("My IP address is:", nic.pretty_ip(nic.ip_address))
-print("IP lookup google.com: %s" %nic.pretty_ip(nic.get_host_by_name("google.com")))
+cs = Pin(CS_PIN, Pin.OUT)
+rst = Pin(RST_PIN, Pin.OUT)
+nic = WIZNET5K(spi, cs, rst)
 
 # Initialize a requests object with a socket and ethernet interface
 requests.set_socket(socket, nic)
-
-
-#nic._debug = True
-print("Fetching text from", TEXT_URL)
-r = requests.get(TEXT_URL)
-print('-'*40)
-print(r.text)
-print('-'*40)
-r.close()
-
-print("Done!")
