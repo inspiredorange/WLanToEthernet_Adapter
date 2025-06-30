@@ -3,7 +3,6 @@
   <component name="MicroPythonTools">
     <option name="increaseBaudrateForFileTransfers" value="false" />
     <option name="increasedFileTransferBaudrate" value="115200" />
-    <option name="legacyVolumeSupportEnabled" value="true" />
     <option name="pluginEnabled" value="true" />
     <option name="portName" value="/dev/cu.usbmodem14301" />
   </component>

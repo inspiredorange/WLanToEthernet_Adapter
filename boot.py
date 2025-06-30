@@ -7,6 +7,19 @@ It flashes the LEDs in a specific sequence as requested.
 from machine import Pin
 import time
 
+# Try to import the web interface module
+try:
+    import webinterface
+    has_webinterface = True
+except ImportError:
+    has_webinterface = False
+
+# Function to log boot messages
+def boot_log(message):
+    print(message)
+    if has_webinterface:
+        webinterface.add_log(f"BOOT: {message}")
+
 # Define the LEDs
 WIFI_LED_PIN = 28
 DATA_LED_PIN = 26
@@ -41,14 +54,19 @@ forward_sequence = [led_wifi, led_data, led_eth, led_builtin]
 # Sequence of LEDs in reverse order
 reverse_sequence = [led_builtin, led_eth, led_data, led_wifi]
 
+# Log the start of the boot sequence
+boot_log("Starting boot sequence - flashing LEDs")
+
 # Flash the LEDs in the specified sequence 3 times
-for _ in range(3):
+for i in range(3):
+    boot_log(f"LED sequence {i+1}/3")
+
     # Forward sequence
     for led in forward_sequence:
         flash_led(led)
-    
+
     # Reverse sequence
     for led in reverse_sequence:
         flash_led(led)
 
-print("Boot sequence completed")
+boot_log("Boot sequence completed")

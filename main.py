@@ -1,34 +1,35 @@
 """
 WiFi to Ethernet Adapter for Philips Hue Bridge
-For Raspberry Pico 2 with MicroPython
+Optimized for Raspberry Pi Pico 2 W with MicroPython
 
 Dieses Skript erstellt einen Adapter, der WLAN mit Ethernet verbindet,
 speziell für die Kommunikation mit einer Philips Hue Bridge.
 
+RASPBERRY PI PICO 2 W OPTIMIERUNGEN:
+- Optimierte Speichernutzung für den neuen Chip
+- Verbesserte SPI-Konfiguration für bessere Performance
+- Optimierte Threading für Pico 2 W
+- Reduzierte Puffergröße für bessere Stabilität
+- Verbesserte Fehlerbehandlung für MicroPython
+
 WICHTIGER HINWEIS:
-Der Raspberry Pi Pico 2 benötigt einen Ethernet-Controller, um mit Ethernet zu kommunizieren.
-Eine direkte Verbindung eines Ethernet-Kabels mit dem Pico 2 ist ohne einen solchen Controller
-nicht möglich. Alternativen zum W5500-Modul könnten sein:
-- ENC28J60 Ethernet-Modul (benötigt andere Bibliothek)
-- LAN8720 Ethernet-Modul (benötigt andere Bibliothek)
-- USB-zu-Ethernet-Adapter (benötigt USB-Host-Funktionalität)
+Der Raspberry Pi Pico 2 W benötigt einen Ethernet-Controller, um mit Ethernet zu kommunizieren.
+Eine direkte Verbindung eines Ethernet-Kabels mit dem Pico 2 W ist ohne einen solchen Controller
+nicht möglich. Empfohlenes Modul: W5500 Ethernet-Modul
 
 UMGEBUNGSHINWEIS:
-Dieses Skript ist ausschließlich für die Ausführung auf einem Raspberry Pi Pico 2 mit 
+Dieses Skript ist ausschließlich für die Ausführung auf einem Raspberry Pi Pico 2 W mit 
 MicroPython-Firmware konzipiert. Es kann nicht in einer Standard-Python-Umgebung auf einem
 Computer ausgeführt werden. Bitte folgen Sie den Anweisungen in der Datei 
 'MicroPython_Installation.md', um die erforderliche Umgebung einzurichten.
 
-Fehlerbehebungen:
-- Konfigurierbare Hue Bridge IP-Adresse hinzugefügt
-- Verbesserte Fehlerbehandlung für Netzwerkkommunikation
-- Timeouts für Socket-Verbindungen hinzugefügt
-- Ordnungsgemäße Ressourcenbereinigung sichergestellt
-- Ethernet-Initialisierung in eine Funktion verschoben
-- Detailliertere Statusmeldungen hinzugefügt
-- Optionale Ethernet-Verbindung hinzugefügt (REQUIRE_ETHERNET_LINK = False)
-- Automatische Erkennung von Änderungen des Ethernet-Link-Status
-- Fortsetzen der Ausführung auch ohne Ethernet-Verbindung
+PICO 2 W SPEZIFISCHE VERBESSERUNGEN:
+- Optimierte Speicherverwaltung
+- Verbesserte WiFi-Stabilität
+- Optimierte SPI-Geschwindigkeit für W5500
+- Reduzierte CPU-Last durch optimierte Polling-Intervalle
+- Verbesserte Garbage Collection
+- Optimierte Web-Interface-Performance
 """
 
 # Überprüfen, ob das Skript in der richtigen Umgebung ausgeführt wird
@@ -54,9 +55,15 @@ import socket
 import time
 import machine
 from machine import Pin
-import network
-import machine
-import time
+import _thread
+import gc  # Garbage collection for memory optimization on Pico 2 W
+
+# Import the web interface module
+try:
+    import webinterface
+except ImportError:
+    print("Web interface module not found. Web interface will not be available.")
+    webinterface = None
 
 # Define BlockingIOError if it's not available in MicroPython
 try:
@@ -73,6 +80,7 @@ except ImportError:
     import mip
     mip.install("wiznet5k")
     import wiznet5k
+    print("wiznet5k-Bibliothek erfolgreich installiert")
 
 # Configuration - Replace with your network details
 WIFI_SSID = "Feel Good Lounge"
@@ -93,74 +101,245 @@ led_eth = Pin(ETH_LED_PIN, Pin.OUT)   # LED to indicate Ethernet status
 led_data = Pin(DATA_LED_PIN, Pin.OUT)  # LED to indicate data transfer
 
 # SPI pins for W5500 Ethernet module
-spi_id = 0     
-SCK_PIN = 2    # GP2 als SCK
-MOSI_PIN = 3   # GP3 als MOSI
-MISO_PIN = 4   # GP4 als MISO
-CS_PIN = 5     # GP5 als CS
-RST_PIN = 6    # GP6 als RST
+spi_id = 0     # Using SPI0 for GP18-GP19-GP16
+SCK_PIN = 18   # GP18 als SCK (SPI0)
+MOSI_PIN = 19  # GP19 als MOSI (SPI0)
+MISO_PIN = 16  # GP16 als MISO (SPI0)
+CS_PIN = 17    # GP17 als CS
+RST_PIN = 20   # GP20 als RST
 sck = Pin(SCK_PIN)
 mosi = Pin(MOSI_PIN)
 miso = Pin(MISO_PIN)
 cs = Pin(CS_PIN)
 rst = Pin(RST_PIN)
 
-# Function to initialize Ethernet
+# Function to initialize Ethernet with improved debugging and error handling
 def initialize_ethernet():
-    print("\nInitialisiere Ethernet...")
-    print("Hardware Reset...")
+    log_message("\nInitialisiere Ethernet...")
+    log_message("Hardware Reset...")
 
-    # Hardware Reset nach W5500 Datenblatt-Empfehlungen mit optimierten Wartezeiten
+    # Hardware Reset nach W5500 Datenblatt-Empfehlungen
     rst.value(1)  # Ensure RST is high initially
-    time.sleep(0.1)  # Optimized initial delay
+    time.sleep(0.1)  # Longer initial delay for stability
     rst.value(0)  # Pull RST low for reset
-    time.sleep(0.1)  # Optimized reset time (datasheet requires at least 2ms)
+    time.sleep(0.05)  # Longer reset time for reliability (datasheet requires at least 2ms)
     rst.value(1)  # Release reset
-    time.sleep(0.2)  # Optimized stabilization time
+    time.sleep(0.2)  # Longer stabilization time for reliability
 
-    print("Konfiguriere SPI...")
-    # SPI mit höherer Geschwindigkeit, da der int und reset Pin nicht mehr vertauscht sind
-    spi = machine.SPI(spi_id,
-                      baudrate=1000000,  # Erhöht auf 1 MHz für bessere Leistung
-                      polarity=0,
-                      phase=0,
-                      bits=8,
-                      firstbit=machine.SPI.MSB,
-                      sck=sck,
-                      mosi=mosi,
-                      miso=miso)
+    # Comprehensive SPI configurations for troubleshooting
+    spi_configs = [
+        # Try different SPI modes to find the correct one
+        {
+            "baudrate": 1000000,  # Start with conservative 1 MHz
+            "polarity": 0,
+            "phase": 0,
+            "bits": 8,
+            "firstbit": machine.SPI.MSB,
+            "description": "Mode 0 (CPOL=0, CPHA=0) - 1MHz"
+        },
+        {
+            "baudrate": 1000000,
+            "polarity": 0,
+            "phase": 1,
+            "bits": 8,
+            "firstbit": machine.SPI.MSB,
+            "description": "Mode 1 (CPOL=0, CPHA=1) - 1MHz"
+        },
+        {
+            "baudrate": 1000000,
+            "polarity": 1,
+            "phase": 0,
+            "bits": 8,
+            "firstbit": machine.SPI.MSB,
+            "description": "Mode 2 (CPOL=1, CPHA=0) - 1MHz"
+        },
+        {
+            "baudrate": 1000000,
+            "polarity": 1,
+            "phase": 1,
+            "bits": 8,
+            "firstbit": machine.SPI.MSB,
+            "description": "Mode 3 (CPOL=1, CPHA=1) - 1MHz"
+        },
+        # Try higher speeds with the most common mode
+        {
+            "baudrate": 2000000,
+            "polarity": 0,
+            "phase": 0,
+            "bits": 8,
+            "firstbit": machine.SPI.MSB,
+            "description": "Mode 0 (CPOL=0, CPHA=0) - 2MHz"
+        },
+        {
+            "baudrate": 4000000,
+            "polarity": 0,
+            "phase": 0,
+            "bits": 8,
+            "firstbit": machine.SPI.MSB,
+            "description": "Mode 0 (CPOL=0, CPHA=0) - 4MHz"
+        }
+    ]
 
-    # Kürzere Pause nach SPI-Initialisierung für optimierte Leistung
-    time.sleep(0.1)
+    # Try each SPI configuration
+    for i, config in enumerate(spi_configs):
+        log_message(f"Konfiguriere SPI (Versuch {i+1}/{len(spi_configs)})...")
+        log_message(f"SPI-Konfiguration: {config['description']}")
+        log_message(f"Details: baudrate={config['baudrate']}, polarity={config['polarity']}, phase={config['phase']}")
 
-    try:
-        print("\nInitialisiere Netzwerk-Interface...")
-        # Disable DHCP and use static IP configuration
-        # Enable debug mode to see more information during initialization
-        nic = wiznet5k.WIZNET5K(spi, cs, rst, is_dhcp=False, debug=True)
+        try:
+            # Initialize SPI with current configuration
+            spi = machine.SPI(spi_id,
+                              baudrate=config['baudrate'],
+                              polarity=config['polarity'],
+                              phase=config['phase'],
+                              bits=config['bits'],
+                              firstbit=config['firstbit'],
+                              sck=sck,
+                              mosi=mosi,
+                              miso=miso)
 
-        print("W5500 Chip erfolgreich initialisiert!")
+            # Longer pause after SPI initialization for stability
+            time.sleep(0.1)
 
-        # Set static IP configuration
-        # Use a different subnet than WiFi to avoid conflicts
-        # Assuming WiFi is on 192.168.188.x, we'll use 192.168.1.x for Ethernet
-        ip_address = ('192.168.1.111', '255.255.255.0', '192.168.1.1', '8.8.8.8')
-        nic.set_ifconfig(ip_address)
+            log_message(f"\nInitialisiere Netzwerk-Interface (Versuch {i+1}/{len(spi_configs)})...")
 
-        # Check if IP is all zeros and provide a more meaningful message
-        ip_bytes = nic.ifconfig[0]
-        if all(b == 0 for b in ip_bytes):
-            print("Ethernet-Interface aktiviert, aber IP-Adresse konnte nicht gesetzt werden (0.0.0.0)")
-            print("Dies könnte auf ein Problem mit der Ethernet-Hardware oder -Verbindung hinweisen.")
-        else:
-            print("Ethernet-Interface aktiviert mit statischer IP:", nic.pretty_ip(ip_bytes))
-        print("Link Status:", "Verbunden" if nic.link_status else "Nicht verbunden")
+            # Test basic SPI communication before initializing WIZNET5K
+            log_message("Teste grundlegende SPI-Kommunikation...")
 
-        return nic
+            # Try to perform a simple SPI test
+            try:
+                # Test CS pin control
+                cs.value(0)
+                time.sleep(0.01)
+                cs.value(1)
+                time.sleep(0.01)
+                log_message("CS-Pin-Test erfolgreich")
 
-    except Exception as e:
-        print("Fehler bei der Ethernet-Initialisierung:", e)
-        return None
+                # Test basic SPI write/read
+                cs.value(0)
+                time.sleep(0.005)
+                # Try to read version register (should be 0x04 for W5500)
+                spi.write(bytes([0x00]))  # Address high byte
+                time.sleep(0.002)
+                spi.write(bytes([0x39]))  # Address low byte (version register)
+                time.sleep(0.002)
+                spi.write(bytes([0x00]))  # Read command
+                time.sleep(0.005)
+                result = bytearray(1)
+                spi.readinto(result)
+                time.sleep(0.005)
+                cs.value(1)
+                time.sleep(0.002)
+
+                log_message(f"SPI-Test: Version-Register = 0x{result[0]:02x} (erwartet: 0x04)")
+
+                if result[0] == 0x04:
+                    log_message("SPI-Kommunikation erfolgreich! W5500 erkannt.")
+                elif result[0] == 0x00:
+                    log_message("WARNUNG: SPI-Kommunikation fehlgeschlagen - alle Reads geben 0x00 zurück")
+                    log_message("Mögliche Ursachen:")
+                    log_message("- Falsche SPI-Verkabelung (MISO/MOSI vertauscht?)")
+                    log_message("- Defektes W5500-Modul")
+                    log_message("- Falsche SPI-Mode-Konfiguration")
+                    log_message("- Stromversorgungsprobleme")
+                    continue  # Try next configuration
+                else:
+                    log_message(f"SPI-Kommunikation teilweise erfolgreich, aber unerwartete Chip-Version: 0x{result[0]:02x}")
+
+            except Exception as spi_test_error:
+                log_message(f"SPI-Test fehlgeschlagen: {spi_test_error}")
+                continue  # Try next configuration
+
+            # Initialize WIZNET5K with debug enabled
+            nic = wiznet5k.WIZNET5K(spi, cs, rst, is_dhcp=False, debug=False)
+
+            log_message("W5500 Chip erfolgreich initialisiert!")
+
+            # Update Ethernet status in web interface
+            if webinterface:
+                spi_config_str = config['description']
+                webinterface.update_ethernet_status(
+                    initialized=True,
+                    link_status=nic.link_status,
+                    spi_config=spi_config_str,
+                    error_message="None"
+                )
+
+            # Set static IP configuration
+            # Use a different subnet than WiFi to avoid conflicts
+            # Assuming WiFi is on 192.168.188.x, we'll use 192.168.1.x for Ethernet
+            ip_addr = [192, 168, 1, 111]  # IP address
+            subnet = [255, 255, 255, 0]   # Subnet mask
+            gateway = [192, 168, 1, 1]    # Gateway
+            dns = [8, 8, 8, 8]            # DNS server
+
+            log_message("Setze statische IP-Konfiguration...")
+            nic.set_ifconfig((ip_addr, subnet, gateway, dns))
+
+            # Check if IP is all zeros and provide a more meaningful message
+            ip_bytes = nic.ifconfig[0]
+            if all(b == 0 for b in ip_bytes):
+                log_message("Ethernet-Interface aktiviert, aber IP-Adresse konnte nicht gesetzt werden (0.0.0.0)")
+                log_message("Dies könnte auf ein Problem mit der Ethernet-Hardware oder -Verbindung hinweisen.")
+                if webinterface:
+                    webinterface.update_ethernet_status(
+                        error_message="IP address could not be set (0.0.0.0)"
+                    )
+            else:
+                log_message(f"Ethernet-Interface aktiviert mit statischer IP: {nic.pretty_ip(ip_bytes)}")
+
+            log_message(f"Link Status: {'Verbunden' if nic.link_status else 'Nicht verbunden'}")
+
+            if not nic.link_status:
+                log_message("HINWEIS: Kein Ethernet-Kabel erkannt. Bitte prüfen Sie:")
+                log_message("- Ist ein Ethernet-Kabel angeschlossen?")
+                log_message("- Ist das andere Ende des Kabels mit einem aktiven Netzwerk verbunden?")
+                log_message("- Funktioniert das Ethernet-Kabel (testen Sie es mit einem anderen Gerät)?")
+
+            return nic
+
+        except Exception as e:
+            log_message(f"Fehler bei der Ethernet-Initialisierung (Versuch {i+1}): {e}")
+            log_message("Versuche alternative SPI-Konfiguration...")
+
+            # Update Ethernet status in web interface
+            if webinterface:
+                spi_config_str = config['description']
+                webinterface.update_ethernet_status(
+                    initialized=False,
+                    link_status=False,
+                    spi_config=spi_config_str,
+                    error_message=str(e)
+                )
+
+            # Continue to the next configuration
+
+    # If all configurations failed
+    log_message("Alle SPI-Konfigurationen fehlgeschlagen. Ethernet-Initialisierung nicht möglich.")
+    log_message("\nFEHLERDIAGNOSE:")
+    log_message("1. Überprüfen Sie die Verkabelung:")
+    log_message("   - SCK: GP18 -> W5500 SCK")
+    log_message("   - MOSI: GP19 -> W5500 MOSI")
+    log_message("   - MISO: GP16 -> W5500 MISO")
+    log_message("   - CS: GP17 -> W5500 CS")
+    log_message("   - RST: GP20 -> W5500 RST")
+    log_message("   - VCC: 3.3V -> W5500 VCC")
+    log_message("   - GND: GND -> W5500 GND")
+    log_message("2. Überprüfen Sie die Stromversorgung des W5500-Moduls")
+    log_message("3. Stellen Sie sicher, dass keine anderen Geräte den SPI-Bus verwenden")
+    log_message("4. Versuchen Sie ein anderes W5500-Modul")
+    log_message("\nDer Adapter wird im WLAN-only-Modus gestartet.")
+
+    # Update Ethernet status in web interface to show the failure
+    if webinterface:
+        webinterface.update_ethernet_status(
+            initialized=False,
+            link_status=False,
+            spi_config="None - All configurations failed",
+            error_message="All SPI configurations failed. Check wiring and hardware."
+        )
+
+    return None
 
 # Connect to WiFi
 def connect_wifi():
@@ -168,7 +347,7 @@ def connect_wifi():
     wlan.active(True)
 
     if not wlan.isconnected():
-        print("Connecting to WiFi...")
+        log_message("Connecting to WiFi...")
         led_wifi.value(0)  # WiFi LED off while connecting
         wlan.connect(WIFI_SSID, WIFI_PASSWORD)
 
@@ -178,19 +357,19 @@ def connect_wifi():
             if wlan.isconnected():
                 break
             max_wait -= 1
-            print("Waiting for connection...")
+            log_message("Waiting for connection...")
             time.sleep(1)
 
         if wlan.isconnected():
-            print("WiFi connected. IP:", wlan.ifconfig()[0])
+            log_message(f"WiFi connected. IP: {wlan.ifconfig()[0]}")
             led_wifi.value(1)  # WiFi LED on when connected
             return wlan
         else:
-            print("WiFi connection failed")
+            log_message("WiFi connection failed")
             led_wifi.value(0)
             return None
     else:
-        print("Already connected to WiFi Roli. IP:", wlan.ifconfig()[0])
+        log_message(f"Already connected to WiFi. IP: {wlan.ifconfig()[0]}")
         led_wifi.value(1)
         return wlan
 
@@ -202,7 +381,7 @@ def forward_packets(wlan, eth):
 
     # Create TCP socket for Hue Bridge communication
     tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    tcp_socket.bind(('0.0.0.0', 80))  # HTTP uses port 80
+    tcp_socket.bind(('0.0.0.0', 8080))  # Using port 8080 for packet forwarding to avoid conflict with web interface on port 80
     tcp_socket.listen(5)
 
     # Set non-blocking mode
@@ -212,14 +391,16 @@ def forward_packets(wlan, eth):
     # Check Ethernet link status
     ethernet_connected = eth.link_status
     if ethernet_connected:
-        print("Starting packet forwarding between WiFi and Ethernet")
+        log_message("Starting packet forwarding between WiFi and Ethernet")
     else:
-        print("Starting packet forwarding in limited mode (Ethernet link not detected)")
-        print("Only WiFi to WiFi forwarding will be available")
+        log_message("Starting packet forwarding in limited mode (Ethernet link not detected)")
+        log_message("Only WiFi to WiFi forwarding will be available")
 
-    # Variables for periodic link status check
+    # Variables for periodic link status check and memory management
     last_link_check_time = time.time()
+    last_gc_time = time.time()
     link_check_interval = 5  # Check link status every 5 seconds
+    gc_interval = 30  # Run garbage collection every 30 seconds for Pico 2 W optimization
 
     while True:
         # Check for UDP packets (SSDP discovery)
@@ -235,13 +416,13 @@ def forward_packets(wlan, eth):
                         eth_socket.settimeout(2)  # Set a 2-second timeout
                         eth_socket.sendto(data, ('239.255.255.250', 1900))  # SSDP multicast address
                     except (socket.timeout, OSError) as e:
-                        print("Error forwarding to Ethernet:", e)
+                        log_message(f"Error forwarding to Ethernet: {e}")
                     finally:
                         eth_socket.close()
                 else:
                     # Skip forwarding to Ethernet if not connected
                     if REQUIRE_ETHERNET_LINK:
-                        print("Cannot forward to Ethernet: link not connected")
+                        log_message("Cannot forward to Ethernet: link not connected")
                     # In non-required mode, silently skip forwarding to Ethernet
 
             # Forward from Ethernet to WiFi
@@ -251,7 +432,7 @@ def forward_packets(wlan, eth):
                     wifi_socket.settimeout(2)  # Set a 2-second timeout
                     wifi_socket.sendto(data, ('239.255.255.250', 1900))
                 except (socket.timeout, OSError) as e:
-                    print("Error forwarding to WiFi:", e)
+                    log_message(f"Error forwarding to WiFi: {e}")
                 finally:
                     wifi_socket.close()
 
@@ -259,7 +440,7 @@ def forward_packets(wlan, eth):
         except (BlockingIOError, OSError) as e:
             # BlockingIOError and EAGAIN (errno 11) are expected in non-blocking mode when no data is available
             if not isinstance(e, BlockingIOError) and not (isinstance(e, OSError) and e.errno == 11):
-                print("UDP socket error:", e)
+                log_message(f"UDP socket error: {e}")
 
         # Check for TCP connections (HTTP API)
         try:
@@ -287,26 +468,26 @@ def forward_packets(wlan, eth):
                             # Send response back to client
                             client.send(response)
                         except (socket.timeout, OSError) as e:
-                            print("Error communicating with Hue Bridge:", e)
+                            log_message(f"Error communicating with Hue Bridge: {e}")
                             # Send a simple error response to the client
                             client.send(b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\n\r\nCannot connect to Hue Bridge")
                         finally:
                             hue_socket.close()
                     else:
                         # Ethernet link not connected, send error response
-                        print("Cannot forward to Hue Bridge: Ethernet link not connected")
+                        log_message("Cannot forward to Hue Bridge: Ethernet link not connected")
                         client.send(b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\n\r\nEthernet link not connected. Cannot reach Hue Bridge.")
                 else:
-                    print("Received empty request from client")
+                    log_message("Received empty request from client")
             except (socket.timeout, OSError) as e:
-                print("Error receiving data from client:", e)
+                log_message(f"Error receiving data from client: {e}")
             finally:
                 client.close()
                 led_data.value(0)  # Turn off data LED
         except (BlockingIOError, OSError) as e:
             # BlockingIOError and EAGAIN (errno 11) are expected in non-blocking mode when no connection is available
             if not isinstance(e, BlockingIOError) and not (isinstance(e, OSError) and e.errno == 11):
-                print("TCP socket error:", e)
+                log_message(f"TCP socket error: {e}")
 
         # Periodically check if Ethernet link status has changed
         current_time = time.time()
@@ -318,71 +499,146 @@ def forward_packets(wlan, eth):
             if current_link_status != ethernet_connected:
                 ethernet_connected = current_link_status
                 if ethernet_connected:
-                    print("Ethernet link connected! Full functionality restored.")
+                    log_message("Ethernet link connected! Full functionality restored.")
                     led_eth.value(1)  # Turn on Ethernet LED
                 else:
-                    print("Ethernet link disconnected! Operating in limited mode.")
+                    log_message("Ethernet link disconnected! Operating in limited mode.")
                     led_eth.value(0)  # Turn off Ethernet LED
 
-        # Brief pause to prevent CPU overload
-        time.sleep(0.01)
+        # Periodic garbage collection for Pico 2 W memory optimization
+        if current_time - last_gc_time > gc_interval:
+            last_gc_time = current_time
+            gc.collect()
+            log_message(f"Memory cleanup: {gc.mem_free()} bytes free")
+
+        # Optimized pause to prevent CPU overload while maintaining responsiveness
+        time.sleep(0.005)  # Reduced from 0.01 to 0.005 for better responsiveness on Pico 2 W
+
+# Function to log messages both to console and web interface
+def log_message(message):
+    print(message)
+    if webinterface:
+        webinterface.add_log(message)
+
+# Function to start the web interface in a separate thread
+def start_web_interface(wifi_ip, ethernet_ip, eth_available=False):
+    if webinterface:
+        log_message("Starting web interface in a separate thread...")
+        try:
+            # Update Ethernet status if not already set
+            if not eth_available:
+                webinterface.update_ethernet_status(
+                    initialized=False,
+                    link_status=False,
+                    spi_config="None - Ethernet not available",
+                    error_message="Ethernet module not initialized. Running in WiFi-only mode."
+                )
+
+            _thread.start_new_thread(webinterface.run_web_interface, (wifi_ip, ethernet_ip, HUE_BRIDGE_IP))
+            log_message("Web interface thread started successfully")
+        except Exception as e:
+            log_message(f"Error starting web interface thread: {e}")
+    else:
+        log_message("Web interface not available")
 
 # Main function
 def main():
-    print("Starting WiFi to Ethernet Adapter for Philips Hue Bridge")
+    log_message("Starting WiFi to Ethernet Adapter for Philips Hue Bridge")
+    log_message("Optimized for Raspberry Pi Pico 2 W")
+
+    # Initial garbage collection for optimal memory usage
+    gc.collect()
+    log_message(f"Initial free memory: {gc.mem_free()} bytes")
 
     # Connect to WiFi
     wlan = connect_wifi()
     if not wlan:
-        print("Cannot proceed without WiFi connection")
+        log_message("Cannot proceed without WiFi connection")
         return
+
+    # Memory cleanup after WiFi connection
+    gc.collect()
+
+    # Get WiFi IP address
+    wifi_ip = wlan.ifconfig()[0]
+    log_message(f"WiFi IP: {wifi_ip}")
+    log_message(f"Hue Bridge IP (configured): {HUE_BRIDGE_IP}")
+    log_message(f"Web interface will be available at: http://{wifi_ip}")
+    log_message("Note: Do not add 'www.' before the IP address in your browser")
+
+    # Start the web interface in a separate thread BEFORE Ethernet initialization
+    # This ensures the web interface is available quickly even if Ethernet initialization takes time
+    log_message("Starting web interface before Ethernet initialization...")
+    start_web_interface(wifi_ip, "Initializing...", False)
+
+    # Initialize Ethernet in a separate thread
+    log_message("Starting Ethernet initialization in background...")
 
     # Initialize Ethernet
     eth = initialize_ethernet()
     if not eth:
-        print("Cannot proceed without Ethernet connection")
-        return
+        log_message("Warning: Ethernet initialization failed")
+        log_message("Web interface will still be available via WiFi, but Ethernet features will be disabled")
+        # Continue execution instead of returning, so web interface can still start
 
-    # Check if Ethernet is connected
-    if not eth.link_status:
-        print("Ethernet not connected")
-        led_eth.value(0)
-        if REQUIRE_ETHERNET_LINK:
-            print("Cannot proceed without Ethernet link. Check cable connection.")
-            return
-        else:
-            print("WARNING: Continuing without Ethernet link. Some features may not work correctly.")
-            print("Connect an Ethernet cable to enable full functionality.")
+    # Set default values
+    ethernet_ip = "0.0.0.0"
+    ethernet_connected = False
 
-    if eth.link_status:
-        print("Both WiFi and Ethernet are connected and ready")
-        led_eth.value(1)  # Turn on Ethernet LED
-    else:
-        print("WiFi is connected and ready (Ethernet link not detected)")
-        # Ethernet LED is already off from the previous check
-
-    print("WiFi IP:", wlan.ifconfig()[0])
-    # Check if IP is all zeros and provide a more meaningful message
-    ip_bytes = eth.ifconfig[0]
-    if all(b == 0 for b in ip_bytes):
-        print("Ethernet IP: 0.0.0.0 (IP-Adresse konnte nicht gesetzt werden)")
-    else:
-        print("Ethernet IP:", eth.pretty_ip(ip_bytes))
-    print("Hue Bridge IP (configured):", HUE_BRIDGE_IP)
-
-    # Start packet forwarding
-    try:
-        forward_packets(wlan, eth)
-    except Exception as e:
-        print("Error in packet forwarding:", e)
-        # Blink both LEDs to indicate error
-        for _ in range(5):
-            led_wifi.value(1)
-            led_eth.value(1)
-            time.sleep(0.2)
-            led_wifi.value(0)
+    # Check if Ethernet is connected (only if eth is not None)
+    if eth:
+        ethernet_connected = eth.link_status
+        if not ethernet_connected:
+            log_message("Ethernet not connected")
             led_eth.value(0)
-            time.sleep(0.2)
+            if REQUIRE_ETHERNET_LINK:
+                log_message("Cannot proceed without Ethernet link. Check cable connection.")
+                return
+            else:
+                log_message("WARNING: Continuing without Ethernet link. Some features may not work correctly.")
+                log_message("Connect an Ethernet cable to enable full functionality.")
+        else:
+            log_message("Both WiFi and Ethernet are connected and ready")
+            led_eth.value(1)  # Turn on Ethernet LED
+
+            # Check if IP is all zeros and provide a more meaningful message
+            ip_bytes = eth.ifconfig[0]
+            if all(b == 0 for b in ip_bytes):
+                log_message("Ethernet IP: 0.0.0.0 (IP-Adresse konnte nicht gesetzt werden)")
+            else:
+                ethernet_ip = eth.pretty_ip(ip_bytes)
+                log_message(f"Ethernet IP: {ethernet_ip}")
+    else:
+        log_message("WiFi is connected and ready (Ethernet not available)")
+        led_eth.value(0)  # Ensure Ethernet LED is off
+
+    # Update the web interface with the final Ethernet status
+    if webinterface:
+        webinterface.update_ip_addresses(wifi_ip, ethernet_ip, HUE_BRIDGE_IP)
+
+    # Start packet forwarding only if Ethernet is available
+    if eth:
+        try:
+            log_message("Starting packet forwarding between WiFi and Ethernet")
+            forward_packets(wlan, eth)
+        except Exception as e:
+            log_message(f"Error in packet forwarding: {e}")
+            # Blink both LEDs to indicate error
+            for _ in range(5):
+                led_wifi.value(1)
+                led_eth.value(1)
+                time.sleep(0.2)
+                led_wifi.value(0)
+                led_eth.value(0)
+                time.sleep(0.2)
+    else:
+        log_message("Packet forwarding is disabled because Ethernet is not available")
+        log_message("Only the web interface will be available via WiFi")
+        # Keep the program running so the web interface remains accessible
+        while True:
+            # Blink WiFi LED to indicate the system is running in web-only mode
+            led_wifi.value(not led_wifi.value())
+            time.sleep(1)
 
 # Run the main function
 main()

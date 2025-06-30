@@ -143,11 +143,11 @@ class WIZNET5K:  # pylint: disable=too-many-public-methods
         self._debug = debug
         self._chip_type = None
         self._device = spi_bus
-        # Initialize SPI with higher speed settings now that hardware issues are fixed
+        # Initialize SPI with normal speed settings
         if self._debug:
-            print("* Initializing SPI with higher speed settings")
+            print("* Initializing SPI with normal speed settings")
         self._device.init(
-            baudrate=1000000,  # Increased to 1 MHz for better performance
+            baudrate=2000000,  # 2 MHz - normal SPI speed
             polarity=0,
             phase=0,
             bits=8,
@@ -155,20 +155,20 @@ class WIZNET5K:  # pylint: disable=too-many-public-methods
         )
         if self._debug:
             print("* SPI initialization completed")
-        # Add a shorter delay after SPI initialization (reduced for higher SPI speed)
-        time.sleep(0.1)
+        # Add a shorter delay after SPI initialization for faster initialization
+        time.sleep(0.05)
         self._cs = cs
         # reset wiznet module prior to initialization
         if reset:
             if self._debug:
                 print("* Performing hardware reset sequence...")
-            # Follow W5500 datasheet reset sequence with optimized delays
+            # Follow W5500 datasheet reset sequence with optimized delays for faster initialization
             reset.value(1)  # Ensure RST is high initially
-            time.sleep(0.1)  # Reduced from 0.2 to 0.1 seconds
+            time.sleep(0.05)  # Reduced for faster initialization
             reset.value(0)  # Pull RST low for reset
-            time.sleep(0.1)  # Reduced from 0.3 to 0.1 seconds (datasheet requires at least 2ms)
+            time.sleep(0.01)  # Reduced (datasheet requires at least 2ms)
             reset.value(1)  # Release reset
-            time.sleep(0.2)  # Reduced from 0.5 to 0.2 seconds
+            time.sleep(0.1)  # Reduced for faster initialization
             if self._debug:
                 print("* Hardware reset sequence completed")
         # Buffer for reading params from module
@@ -358,14 +358,103 @@ class WIZNET5K:  # pylint: disable=too-many-public-methods
             self._pbuff[octet] = self._read_socket(socket_num, REG_SNDPORT + octet)[0]
         return int((self._pbuff[0] << 8) | self._pbuff[1])
 
+    def _write_with_verification(self, addr, callback, data, max_retries=3):
+        """Writes to a register with verification and retry.
+        :param int addr: Register address.
+        :param int callback: Callback reference.
+        :param int data: Data to write, as an integer.
+        :param int max_retries: Maximum number of retry attempts.
+        :return: True if write was verified, False if verification failed after all retries
+        """
+        if self._debug:
+            print(f"* Writing {hex(data) if isinstance(data, int) else data} to register {hex(addr)}")
+
+        retry_count = 0
+        verified = False
+
+        while not verified and retry_count < max_retries:
+            # Write the data to the register
+            self.write(addr, callback, data)
+
+            # Add a short delay after writing to ensure the value is properly set before reading it back
+            time.sleep(0.01)  # Reduced to 10ms for faster operation
+
+            if self._debug:
+                print(f"* Completed write to register {hex(addr)}, attempt {retry_count + 1}")
+
+            # Verify the write by reading back the value
+            if retry_count < max_retries - 1:  # Skip verification on last attempt to save time
+                read_value = self.read(addr, 0x00)[0]
+
+                if self._debug:
+                    print(f"* Verification read: got {hex(read_value) if isinstance(read_value, int) else read_value}, expected {hex(data) if isinstance(data, int) else data}")
+
+                if read_value == data:
+                    verified = True
+                    if self._debug:
+                        print(f"* Register write verified successfully")
+                    break
+                else:
+                    # If verification failed, wait a short time before retrying
+                    retry_count += 1
+                    if self._debug:
+                        print(f"* Verification failed, retrying ({retry_count}/{max_retries})...")
+                    time.sleep(0.01)  # Reduced to 10ms for faster operation
+            else:
+                # Last attempt, don't verify
+                retry_count += 1
+
+        return verified
+
     def set_ifconfig(self, params):
         """Sets network configuration to provided tuple in format:
         (ip_address, subnet_mask, gateway_address, dns_server).
         """
         ip_address, subnet_mask, gateway_address, dns_server = params
-        self.write(REG_SIPR, 0x04, ip_address)
-        self.write(REG_SUBR, 0x04, subnet_mask)
-        self.write(REG_GAR, 0x04, gateway_address)
+
+        # Write each octet individually to ensure correct byte order
+        if self._debug:
+            print(f"* Setting IP address: {ip_address}")
+            print(f"* Setting subnet mask: {subnet_mask}")
+            print(f"* Setting gateway address: {gateway_address}")
+
+        # Write IP address with verification
+        for i in range(4):
+            success = self._write_with_verification(REG_SIPR + i, 0x04, ip_address[i])
+            if not success and self._debug:
+                print(f"* Warning: Failed to verify IP address byte {i} write")
+
+        # Write subnet mask with verification
+        for i in range(4):
+            success = self._write_with_verification(REG_SUBR + i, 0x04, subnet_mask[i])
+            if not success and self._debug:
+                print(f"* Warning: Failed to verify subnet mask byte {i} write")
+
+        # Write gateway address with verification
+        for i in range(4):
+            success = self._write_with_verification(REG_GAR + i, 0x04, gateway_address[i])
+            if not success and self._debug:
+                print(f"* Warning: Failed to verify gateway address byte {i} write")
+
+        # Verify the entire configuration was set correctly
+        if self._debug:
+            print("* Verifying entire network configuration...")
+            current_ip = self.read(REG_SIPR, 0x00, 4)
+            current_subnet = self.read(REG_SUBR, 0x00, 4)
+            current_gateway = self.read(REG_GAR, 0x00, 4)
+
+            print(f"* Current IP: {current_ip}")
+            print(f"* Current subnet: {current_subnet}")
+            print(f"* Current gateway: {current_gateway}")
+
+            if current_ip == bytearray(ip_address) and current_subnet == bytearray(subnet_mask) and current_gateway == bytearray(gateway_address):
+                print("* Network configuration verified successfully")
+            else:
+                print("* Warning: Network configuration verification failed")
+                print(f"* Expected IP: {ip_address}, got: {current_ip}")
+                print(f"* Expected subnet: {subnet_mask}, got: {current_subnet}")
+                print(f"* Expected gateway: {gateway_address}, got: {current_gateway}")
+
         self._dns = dns_server
 
     @property
@@ -384,12 +473,12 @@ class WIZNET5K:  # pylint: disable=too-many-public-methods
         if self._debug:
             print("* Starting W5500 initialization")
 
-        # Wait for the chip to be ready after power-up/reset (reduced for higher SPI speed)
-        time.sleep(1)  # Reduced from 2 to 1 second
+        # Wait for the chip to be ready after power-up/reset (reduced for faster initialization)
+        time.sleep(0.2)  # Reduced from 2 seconds for faster initialization
 
         # Ensure CS is high before starting
         self._cs.value(1)
-        time.sleep(0.1)  # Reduced from 0.2 to 0.1 seconds
+        time.sleep(0.05)  # Reduced from 0.5 seconds for faster initialization
 
         # Detect if chip is Wiznet W5500
         if self._debug:
@@ -406,9 +495,9 @@ class WIZNET5K:  # pylint: disable=too-many-public-methods
                     print(f"* Initializing socket {i}")
                 ctrl_byte = 0x0C + (i << 5)
                 self.write(0x1E, ctrl_byte, 2)
-                time.sleep(0.005)  # Reduced from 0.01 to 0.005 seconds
+                time.sleep(0.001)  # Reduced from 0.02 seconds for faster initialization
                 self.write(0x1F, ctrl_byte, 2)
-                time.sleep(0.005)  # Reduced from 0.01 to 0.005 seconds
+                time.sleep(0.001)  # Reduced from 0.02 seconds for faster initialization
 
             if self._debug:
                 print("* W5500 initialization completed successfully")
@@ -433,55 +522,15 @@ class WIZNET5K:  # pylint: disable=too-many-public-methods
                 print("* Chip not reset properly, but continuing anyway")
             # Continue anyway, don't return error
 
-        # Test writing and reading 0x08 to mode register
-        if self._debug:
-            print("* Writing 0x08 to mode register")
-
-        # Use the improved _write_mr method with verification
-        write_success = self._write_mr(0x08)
-
-        if not write_success:
-            if self._debug:
-                print("* Failed to write 0x08 to mode register after multiple attempts")
-                print("* Trying a different approach with reset sequence")
-
-            # Try a more aggressive approach with reset
-            self.sw_reset()
-            time.sleep(0.2)  # Reduced from 0.5 to 0.2 seconds
-
-            # Try writing 0x00 first (neutral value)
-            self._write_mr(0x00)
-            time.sleep(0.1)  # Reduced from 0.3 to 0.1 seconds
-
-            # Then try writing 0x08 again
-            write_success = self._write_mr(0x08)
-
-            if not write_success and self._debug:
-                print("* All attempts to write 0x08 failed, but continuing anyway")
-
-        # Test writing and reading 0x10 to mode register
-        if self._debug:
-            print("* Writing 0x10 to mode register")
-
-        # Use the improved _write_mr method with verification
-        write_success = self._write_mr(0x10)
-
-        if not write_success:
-            if self._debug:
-                print("* Failed to write 0x10 to mode register after multiple attempts")
-                print("* Continuing anyway")
-
-        # Finally, set the mode register back to 0x00 (normal operation)
+        # Set the mode register to 0x00 (normal operation)
         if self._debug:
             print("* Writing 0x00 to mode register")
 
         # Use the improved _write_mr method with verification
         write_success = self._write_mr(0x00)
 
-        if not write_success:
-            if self._debug:
-                print("* Failed to write 0x00 to mode register after multiple attempts")
-                print("* Continuing anyway")
+        if not write_success and self._debug:
+            print("* Failed to write 0x00 to mode register, but continuing anyway")
 
         # Check chip version
         version = self.read(REG_VERSIONR_W5500, 0x00)[0]
@@ -522,10 +571,10 @@ class WIZNET5K:  # pylint: disable=too-many-public-methods
         if not write_success and self._debug:
             print("* Warning: Failed to verify reset bit write, but continuing with reset process")
 
-        # Wait for reset to complete
+        # Wait for reset to complete - minimal delay
         if self._debug:
             print("* Waiting for reset to complete...")
-        time.sleep(0.2)  # Reduced from 0.5 to 0.2 seconds
+        time.sleep(0.02)  # Reduced to 20ms for faster operation
         if self._debug:
             print("* Reset wait completed")
 
@@ -537,50 +586,12 @@ class WIZNET5K:  # pylint: disable=too-many-public-methods
         # Check if reset was successful (mode register should be 0x00 after reset)
         if mode_reg[0] != 0x00:
             if self._debug:
-                print("* First reset attempt failed, expected 0x00, got", hex(mode_reg[0]))
-                print("* Trying reset again with longer delay...")
-
-            # Try reset again with longer delay and more aggressive approach
-            write_success = self._write_mr(0x80)
-            if not write_success and self._debug:
-                print("* Warning: Failed to verify second reset bit write")
-
-            # Moderate delay for retry
-            time.sleep(0.5)  # Reduced from 1.0 to 0.5 seconds
-
-            # Check if second reset attempt was successful
-            mode_reg = self._read_mr()
-            if self._debug:
-                print("* Mode register value after second reset:", hex(mode_reg[0]))
-
-            if mode_reg[0] != 0x00:
-                if self._debug:
-                    print("* Second reset attempt failed, expected 0x00, got", hex(mode_reg[0]))
-                    print("* Trying one final reset with maximum delay...")
-
-                # Final attempt with moderate delay
-                write_success = self._write_mr(0x80)
-                time.sleep(1.0)  # Reduced from 2.0 to 1.0 seconds
-
-                mode_reg = self._read_mr()
-                if self._debug:
-                    print("* Mode register value after final reset:", hex(mode_reg[0]))
-
-                if mode_reg[0] != 0x00:
-                    if self._debug:
-                        print("* All reset attempts failed, but continuing anyway")
-                    return -1
-                else:
-                    if self._debug:
-                        print("* Final reset attempt successful")
-                    return 0
-            else:
-                if self._debug:
-                    print("* Second reset attempt successful")
-                return 0
+                print("* Reset attempt failed, expected 0x00, got", hex(mode_reg[0]))
+                print("* Continuing anyway")
+            return -1
         else:
             if self._debug:
-                print("* First reset attempt successful")
+                print("* Reset attempt successful")
             return 0
 
 
@@ -599,7 +610,7 @@ class WIZNET5K:  # pylint: disable=too-many-public-methods
             print(f"* Writing {hex(data)} to mode register (MR)")
 
         # Maximum number of retry attempts
-        max_retries = 5
+        max_retries = 3  # Reduced to 3 for faster operation
         retry_count = 0
         verified = False
 
@@ -607,9 +618,8 @@ class WIZNET5K:  # pylint: disable=too-many-public-methods
             # Write the data to the mode register
             self.write(REG_MR, 0x04, data)
 
-            # Add a moderate delay after writing to the mode register
-            # to ensure the value is properly set before reading it back
-            time.sleep(0.2)  # Reduced from 0.5 to 0.2 seconds
+            # Add a minimal delay after writing to the mode register
+            time.sleep(0.01)  # Reduced to 10ms for faster operation
 
             if self._debug:
                 print(f"* Completed write to mode register, attempt {retry_count + 1}")
@@ -627,11 +637,11 @@ class WIZNET5K:  # pylint: disable=too-many-public-methods
                         print(f"* Mode register write verified successfully")
                     break
                 else:
-                    # If verification failed, wait longer before retrying
+                    # If verification failed, wait a minimal time before retrying
                     retry_count += 1
                     if self._debug:
                         print(f"* Verification failed, retrying ({retry_count}/{max_retries})...")
-                    time.sleep(0.05 * (retry_count + 1))  # Reduced from 0.1 to 0.05 seconds per retry
+                    time.sleep(0.01)  # Flat 10ms delay for faster operation
             else:
                 # Last attempt, don't verify
                 retry_count += 1
@@ -646,16 +656,24 @@ class WIZNET5K:  # pylint: disable=too-many-public-methods
         if self._debug:
             print(f'READ from {addr}')
         self._cs.value(0)
+        time.sleep(0.005)  # Increased delay after CS goes low
         self._device.write(bytes([addr >> 8]))  # pylint: disable=no-member
+        time.sleep(0.002)  # Add delay between writes
         self._device.write(bytes([addr & 0xFF]))  # pylint: disable=no-member
+        time.sleep(0.002)  # Add delay between writes
         self._device.write(bytes([callback]))  # pylint: disable=no-member
+        time.sleep(0.005)  # Increased delay before reading
         if buffer is None:
             self._rxbuf = bytearray(length)
             self._device.readinto(self._rxbuf)  # pylint: disable=no-member
+            time.sleep(0.005)  # Increased delay before CS goes high
             self._cs.value(1)
+            time.sleep(0.002)  # Add delay after CS goes high
             return self._rxbuf
         self._device.readinto(buffer, end=length)  # pylint: disable=no-member
+        time.sleep(0.005)  # Increased delay before CS goes high
         self._cs.value(1)
+        time.sleep(0.002)  # Add delay after CS goes high
         return buffer
 
 
@@ -669,16 +687,24 @@ class WIZNET5K:  # pylint: disable=too-many-public-methods
         if self._debug:
             print(f'WRITE on {addr}')
         self._cs.value(0)
+        time.sleep(0.005)  # Increased delay after CS goes low
         self._device.write(bytes([addr >> 8]))  # pylint: disable=no-member
+        time.sleep(0.002)  # Add delay between writes
         self._device.write(bytes([addr & 0xFF]))  # pylint: disable=no-member
+        time.sleep(0.002)  # Add delay between writes
         self._device.write(bytes([callback]))  # pylint: disable=no-member
+        time.sleep(0.005)  # Increased delay before writing data
 
         if hasattr(data, "from_bytes"):
             self._device.write(bytes([data]))  # pylint: disable=no-member
+            time.sleep(0.002)  # Add delay after data write
         else:
             for i, _ in enumerate(data):
                 self._device.write(bytes([data[i]]))  # pylint: disable=no-member
+                time.sleep(0.002)  # Add delay between data writes
+        time.sleep(0.005)  # Increased delay before CS goes high
         self._cs.value(1)
+        time.sleep(0.002)  # Add delay after CS goes high
 
 
     # Socket-Register API
